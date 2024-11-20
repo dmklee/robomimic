@@ -10,6 +10,7 @@ import open3d as o3d
 
 import robosuite
 from robosuite.utils.camera_utils import get_real_depth_map, get_camera_extrinsic_matrix, get_camera_intrinsic_matrix
+
 try:
     # this is needed for ensuring robosuite can find the additional mimicgen environments (see https://mimicgen.github.io)
     import mimicgen_envs
@@ -22,9 +23,11 @@ import robomimic.envs.env_base as EB
 # protect against missing mujoco-py module, since robosuite might be using mujoco-py or DM backend
 try:
     import mujoco_py
+
     MUJOCO_EXCEPTIONS = [mujoco_py.builder.MujocoException]
 except ImportError:
     MUJOCO_EXCEPTIONS = []
+
 
 def depth2fgpcd(depth, mask, cam_params):
     # depth: (h, w)
@@ -43,6 +46,7 @@ def depth2fgpcd(depth, mask, cam_params):
     fgpcd[:, 2] = depth[mask]
     return fgpcd
 
+
 def np2o3d(pcd, color=None):
     # pcd: (n, 3)
     # color: (n, 3)
@@ -55,16 +59,18 @@ def np2o3d(pcd, color=None):
         pcd_o3d.colors = o3d.utility.Vector3dVector(color)
     return pcd_o3d
 
+
 class EnvRobosuite(EB.EnvBase):
     """Wrapper class for robosuite environments (https://github.com/ARISE-Initiative/robosuite)"""
+
     def __init__(
-        self, 
-        env_name, 
-        render=False, 
-        render_offscreen=False, 
-        use_image_obs=False, 
-        postprocess_visual_obs=True, 
-        **kwargs,
+            self,
+            env_name,
+            render=False,
+            render_offscreen=False,
+            use_image_obs=False,
+            postprocess_visual_obs=True,
+            **kwargs,
     ):
         """
         Args:
@@ -116,7 +122,7 @@ class EnvRobosuite(EB.EnvBase):
             # make sure gripper visualization is turned off (we almost always want this for learning)
             kwargs["gripper_visualization"] = False
             del kwargs["camera_depths"]
-            kwargs["camera_depth"] = False # rename kwarg
+            kwargs["camera_depth"] = False  # rename kwarg
 
         self._env_name = env_name
         self._init_kwargs = deepcopy(kwargs)
@@ -143,13 +149,13 @@ class EnvRobosuite(EB.EnvBase):
             self.ws_size = 1.1
 
         self.voxel_workspace = np.array([
-            [voxel_center[0] - self.ws_size/2, voxel_center[0] + self.ws_size/2],
-            [voxel_center[1] - self.ws_size/2, voxel_center[1] + self.ws_size/2],
+            [voxel_center[0] - self.ws_size / 2, voxel_center[0] + self.ws_size / 2],
+            [voxel_center[1] - self.ws_size / 2, voxel_center[1] + self.ws_size / 2],
             [voxel_center[2], voxel_center[2] + self.ws_size]
         ])
         self.pc_workspace = np.array([
-            [pc_center[0] - self.ws_size/2, pc_center[0] + self.ws_size/2],
-            [pc_center[1] - self.ws_size/2, pc_center[1] + self.ws_size/2],
+            [pc_center[0] - self.ws_size / 2, pc_center[0] + self.ws_size / 2],
+            [pc_center[1] - self.ws_size / 2, pc_center[1] + self.ws_size / 2],
             [pc_center[2], pc_center[2] + self.ws_size]
         ])
 
@@ -203,6 +209,7 @@ class EnvRobosuite(EB.EnvBase):
             else:
                 # v1.4 and above use the class-based edit_model_xml function
                 xml = self.env.edit_model_xml(state["model"])
+
             self.env.reset_from_xml_string(xml)
             self.env.sim.reset()
             if not self._is_v1:
@@ -298,17 +305,22 @@ class EnvRobosuite(EB.EnvBase):
 
                 # pose = np.linalg.inv(ext_mat)
                 pose = ext_mat
-                
+
                 trans_pcd = pose @ np.concatenate([pcd.T, np.ones((1, pcd.shape[0]))], axis=0)
                 trans_pcd = trans_pcd[:3, :].T
 
-                mask = (trans_pcd[:, 0] > workspace[0, 0]) * (trans_pcd[:, 0] < workspace[0, 1]) * (trans_pcd[:, 1] > workspace[1, 0]) * (trans_pcd[:, 1] < workspace[1, 1]) * (trans_pcd[:, 2] > workspace[2, 0]) * (trans_pcd[:, 2] < workspace[2, 1])
+                mask = (trans_pcd[:, 0] > workspace[0, 0]) * (trans_pcd[:, 0] < workspace[0, 1]) * (
+                            trans_pcd[:, 1] > workspace[1, 0]) * (trans_pcd[:, 1] < workspace[1, 1]) * (
+                                   trans_pcd[:, 2] > workspace[2, 0]) * (trans_pcd[:, 2] < workspace[2, 1])
 
                 pcd_o3d = np2o3d(trans_pcd[mask], color.reshape(-1, 3)[mask].astype(np.float64) / 255)
 
                 all_pcds += pcd_o3d
 
-            voxel_grid = o3d.geometry.VoxelGrid.create_from_point_cloud_within_bounds(all_pcds, voxel_size=self.ws_size/voxel_size+1e-4, min_bound=voxel_bound[0], max_bound=voxel_bound[1])
+            voxel_grid = o3d.geometry.VoxelGrid.create_from_point_cloud_within_bounds(all_pcds,
+                                                                                      voxel_size=self.ws_size / voxel_size + 1e-4,
+                                                                                      min_bound=voxel_bound[0],
+                                                                                      max_bound=voxel_bound[1])
             voxels = voxel_grid.get_voxels()  # returns list of voxels
             if len(voxels) == 0:
                 np_voxels = np.zeros([4, voxel_size, voxel_size, voxel_size], dtype=np.uint8)
@@ -333,7 +345,7 @@ class EnvRobosuite(EB.EnvBase):
             # # Create a 3D plot
             # fig = plt.figure()
             # ax = fig.add_subplot(111, projection='3d')
-            
+
             # # indices = np.argwhere(np_voxels[0] != 0)
             # # colors = np_voxels[1:, indices[:, 0], indices[:, 1], indices[:, 2]].T
 
@@ -412,8 +424,8 @@ class EnvRobosuite(EB.EnvBase):
         """
         Get current environment simulator state as a dictionary. Should be compatible with @reset_to.
         """
-        xml = self.env.sim.model.get_xml() # model xml file
-        state = np.array(self.env.sim.get_state().flatten()) # simulator state
+        xml = self.env.sim.model.get_xml()  # model xml file
+        state = np.array(self.env.sim.get_state().flatten())  # simulator state
         return dict(model=xml, states=state)
 
     def get_reward(self):
@@ -452,7 +464,7 @@ class EnvRobosuite(EB.EnvBase):
         if isinstance(succ, dict):
             assert "task" in succ
             return succ
-        return { "task" : succ }
+        return {"task": succ}
 
     @property
     def action_dimension(self):
@@ -498,13 +510,13 @@ class EnvRobosuite(EB.EnvBase):
 
     @classmethod
     def create_for_data_processing(
-        cls, 
-        env_name, 
-        camera_names, 
-        camera_height, 
-        camera_width, 
-        reward_shaping, 
-        **kwargs,
+            cls,
+            env_name,
+            camera_names,
+            camera_height,
+            camera_width,
+            reward_shaping,
+            **kwargs,
     ):
         """
         Create environment for processing datasets, which includes extracting
@@ -550,7 +562,7 @@ class EnvRobosuite(EB.EnvBase):
             image_modalities = ["rgb"]
         obs_modality_specs = {
             "obs": {
-                "low_dim": [], # technically unused, so we don't have to specify all of them
+                "low_dim": [],  # technically unused, so we don't have to specify all of them
                 "rgb": image_modalities,
                 "depth": depth_modalities,
             }
@@ -560,9 +572,9 @@ class EnvRobosuite(EB.EnvBase):
         # note that @postprocess_visual_obs is False since this env's images will be written to a dataset
         return cls(
             env_name=env_name,
-            render=False, 
-            render_offscreen=has_camera, 
-            use_image_obs=has_camera, 
+            render=False,
+            render_offscreen=has_camera,
+            use_image_obs=has_camera,
             postprocess_visual_obs=False,
             **kwargs,
         )
