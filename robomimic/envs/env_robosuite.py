@@ -6,10 +6,9 @@ with metadata present in datasets.
 import json
 import numpy as np
 from copy import deepcopy
-import open3d as o3d
 
 import robosuite
-from robosuite.utils.camera_utils import get_real_depth_map, get_camera_extrinsic_matrix, get_camera_intrinsic_matrix
+import robosuite.utils.transform_utils as T
 
 try:
     # this is needed for ensuring robosuite can find the additional mimicgen environments (see https://mimicgen.github.io)
@@ -27,37 +26,6 @@ try:
     MUJOCO_EXCEPTIONS = [mujoco_py.builder.MujocoException]
 except ImportError:
     MUJOCO_EXCEPTIONS = []
-
-
-def depth2fgpcd(depth, mask, cam_params):
-    # depth: (h, w)
-    # fgpcd: (n, 3)
-    # mask: (h, w)
-    h, w = depth.shape
-    mask = np.logical_and(mask, depth > 0)
-    # mask = (depth <= 0.599/0.8)
-    fgpcd = np.zeros((mask.sum(), 3))
-    fx, fy, cx, cy = cam_params
-    pos_x, pos_y = np.meshgrid(np.arange(w), np.arange(h))
-    pos_x = pos_x[mask]
-    pos_y = pos_y[mask]
-    fgpcd[:, 0] = (pos_x - cx) * depth[mask] / fx
-    fgpcd[:, 1] = (pos_y - cy) * depth[mask] / fy
-    fgpcd[:, 2] = depth[mask]
-    return fgpcd
-
-
-def np2o3d(pcd, color=None):
-    # pcd: (n, 3)
-    # color: (n, 3)
-    pcd_o3d = o3d.geometry.PointCloud()
-    pcd_o3d.points = o3d.utility.Vector3dVector(pcd)
-    if color is not None and color.shape[0] > 0:
-        assert pcd.shape[0] == color.shape[0]
-        assert color.max() <= 1
-        assert color.min() >= 0
-        pcd_o3d.colors = o3d.utility.Vector3dVector(color)
-    return pcd_o3d
 
 
 class EnvRobosuite(EB.EnvBase):
@@ -133,31 +101,6 @@ class EnvRobosuite(EB.EnvBase):
             for ob_name in self.env.observation_names:
                 if ("joint_pos" in ob_name) or ("eef_vel" in ob_name):
                     self.env.modify_observable(observable_name=ob_name, attribute="active", modifier=True)
-
-        voxel_center = np.array([0, 0, 0.7])
-        pc_center = np.array([0, 0, 0.7])
-        if hasattr(self.env, 'table_offset'):
-            voxel_center[:2] = self.env.table_offset[:2]
-            pc_center = np.array(self.env.table_offset)
-            pc_center[2] = pc_center[2] + 0.02
-        self.ws_size = 0.6
-        if env_name.startswith('Kitchen_'):
-            self.ws_size = 0.7
-            pc_center = self.env.table_offset
-        elif env_name.startswith('PickPlace_'):
-            pc_center = np.array([0, 0, 0.83])
-            self.ws_size = 1.1
-
-        self.voxel_workspace = np.array([
-            [voxel_center[0] - self.ws_size / 2, voxel_center[0] + self.ws_size / 2],
-            [voxel_center[1] - self.ws_size / 2, voxel_center[1] + self.ws_size / 2],
-            [voxel_center[2], voxel_center[2] + self.ws_size]
-        ])
-        self.pc_workspace = np.array([
-            [pc_center[0] - self.ws_size / 2, pc_center[0] + self.ws_size / 2],
-            [pc_center[1] - self.ws_size / 2, pc_center[1] + self.ws_size / 2],
-            [pc_center[2], pc_center[2] + self.ws_size]
-        ])
 
     def step(self, action):
         """
@@ -263,145 +206,19 @@ class EnvRobosuite(EB.EnvBase):
                 ret[k] = di[k][::-1]
                 if self.postprocess_visual_obs:
                     ret[k] = ObsUtils.process_obs(obs=ret[k], obs_key=k)
-            if (k in ObsUtils.OBS_KEYS_TO_MODALITIES) and ObsUtils.key_is_obs_modality(key=k, obs_modality="depth"):
-                depth_map = di[k][::-1]
-                depth_map = np.clip(depth_map, 0, 1)
-                ret[k] = get_real_depth_map(self.env.sim, depth_map)
+            elif (k in ObsUtils.OBS_KEYS_TO_MODALITIES) and ObsUtils.key_is_obs_modality(key=k, obs_modality="depth"):
+                ret[k] = di[k][::-1]
+                ret[k] = np.clip(ret[k], 0, 1)
+                if len(ret[k].shape) == 2:
+                    ret[k] = ret[k][..., None]  # (H, W, 1)
+                assert len(ret[k].shape) == 3
+                # scale entries in depth map to correspond to real distance.
+                ret[k] = self.get_real_depth_map(ret[k])
                 if self.postprocess_visual_obs:
                     ret[k] = ObsUtils.process_obs(obs=ret[k], obs_key=k)
 
         # "object" key contains object information
         ret["object"] = np.array(di["object-state"])
-
-        if self.env.use_camera_obs:
-            workspace = self.voxel_workspace
-
-            # voxel_bound = np.array([
-            #     [center[0] - ws_size/2, center[1] - ws_size/2, center[2] - 0.05],
-            #     [center[0] + ws_size/2, center[1] + ws_size/2, center[2] - 0.05 + ws_size],
-            # ])
-            voxel_bound = workspace.T
-            voxel_size = 64
-
-            all_pcds = o3d.geometry.PointCloud()
-            for cam_idx, camera_name in enumerate(self.env.camera_names):
-                cam_height = self.env.camera_heights[cam_idx]
-                cam_width = self.env.camera_widths[cam_idx]
-                ext_mat = get_camera_extrinsic_matrix(self.env.sim, camera_name)
-                int_mat = get_camera_intrinsic_matrix(self.env.sim, camera_name, cam_height, cam_width)
-                depth = di[f'{camera_name}_depth'][::-1]
-                depth = np.clip(depth, 0, 1)
-                depth = get_real_depth_map(self.env.sim, depth)
-                depth = depth[:, :, 0]
-                color = di[f'{camera_name}_image'][::-1]
-                # depth = ret[f'{camera_name}_depth'][:, :, 0]
-                # color = ret[f'{camera_name}_image']
-                # if camera_name != 'agentview':
-                #     del ret[f'{camera_name}_depth']
-                #     del ret[f'{camera_name}_image']
-                cam_param = [int_mat[0, 0], int_mat[1, 1], int_mat[0, 2], int_mat[1, 2]]
-                mask = np.ones_like(depth, dtype=bool)
-                pcd = depth2fgpcd(depth, mask, cam_param)
-
-                # pose = np.linalg.inv(ext_mat)
-                pose = ext_mat
-
-                trans_pcd = pose @ np.concatenate([pcd.T, np.ones((1, pcd.shape[0]))], axis=0)
-                trans_pcd = trans_pcd[:3, :].T
-
-                mask = (trans_pcd[:, 0] > workspace[0, 0]) * (trans_pcd[:, 0] < workspace[0, 1]) * (
-                            trans_pcd[:, 1] > workspace[1, 0]) * (trans_pcd[:, 1] < workspace[1, 1]) * (
-                                   trans_pcd[:, 2] > workspace[2, 0]) * (trans_pcd[:, 2] < workspace[2, 1])
-
-                pcd_o3d = np2o3d(trans_pcd[mask], color.reshape(-1, 3)[mask].astype(np.float64) / 255)
-
-                all_pcds += pcd_o3d
-
-            voxel_grid = o3d.geometry.VoxelGrid.create_from_point_cloud_within_bounds(all_pcds,
-                                                                                      voxel_size=self.ws_size / voxel_size + 1e-4,
-                                                                                      min_bound=voxel_bound[0],
-                                                                                      max_bound=voxel_bound[1])
-            voxels = voxel_grid.get_voxels()  # returns list of voxels
-            if len(voxels) == 0:
-                np_voxels = np.zeros([4, voxel_size, voxel_size, voxel_size], dtype=np.uint8)
-            else:
-                indices = np.stack(list(vx.grid_index for vx in voxels))
-                colors = np.stack(list(vx.color for vx in voxels))
-
-                mask = (indices > 0) * (indices < voxel_size)
-                indices = indices[mask.all(axis=1)]
-                colors = colors[mask.all(axis=1)]
-
-                np_voxels = np.zeros([4, voxel_size, voxel_size, voxel_size], dtype=np.uint8)
-                np_voxels[0, indices[:, 0], indices[:, 1], indices[:, 2]] = 1
-                np_voxels[1:, indices[:, 0], indices[:, 1], indices[:, 2]] = colors.T * 255
-
-            # np_voxels = np.moveaxis(np_voxels, [0, 1, 2, 3], [0, 3, 2, 1])
-            # np_voxels = np.flip(np_voxels, (1, 2))
-
-            # import matplotlib.pyplot as plt
-            # from mpl_toolkits.mplot3d import Axes3D
-
-            # # Create a 3D plot
-            # fig = plt.figure()
-            # ax = fig.add_subplot(111, projection='3d')
-
-            # # indices = np.argwhere(np_voxels[0] != 0)
-            # # colors = np_voxels[1:, indices[:, 0], indices[:, 1], indices[:, 2]].T
-
-            # ax.scatter(indices[:, 0], indices[:, 1], indices[:, 2], color=colors, marker='s')
-
-            # # Set labels and show the plot
-            # ax.set_xlabel('X Axis')
-            # ax.set_ylabel('Y Axis')
-            # ax.set_zlabel('Z Axis')
-            # ax.set_xlim(0, 64)
-            # ax.set_ylim(0, 64)
-            # ax.set_zlim(0, 64)
-            # plt.savefig('test2.png')
-            # plt.close()
-
-            ret['voxels'] = np_voxels
-
-            bounding_box = o3d.geometry.AxisAlignedBoundingBox(self.pc_workspace.T[0], self.pc_workspace.T[1])
-            cropped_pcd = all_pcds.crop(bounding_box)
-            if len(cropped_pcd.points) == 0:
-                # create fake points
-                cropped_pcd.points = o3d.utility.Vector3dVector(np.array([[0., 0., 0.]]))
-                cropped_pcd.colors = o3d.utility.Vector3dVector(np.array([[0., 0., 0.]]))
-            if len(cropped_pcd.points) < 1024:
-                # random upsample to 1024
-                num_pad = 1024 - len(cropped_pcd.points)
-                indices = np.random.choice(len(cropped_pcd.points), num_pad)
-                padded_xyz = np.asarray(cropped_pcd.points)[indices]
-                padded_color = np.asarray(cropped_pcd.colors)[indices]
-                xyz = np.concatenate([np.asarray(cropped_pcd.points), padded_xyz], 0)
-                color = np.concatenate([np.asarray(cropped_pcd.colors), padded_color], 0)
-                cropped_pcd = o3d.geometry.PointCloud()
-                cropped_pcd.points = o3d.utility.Vector3dVector(xyz)
-                cropped_pcd.colors = o3d.utility.Vector3dVector(color)
-            sampled_pcds = cropped_pcd.farthest_point_down_sample(1024)
-            xyz = np.asarray(sampled_pcds.points)
-            color = np.asarray(sampled_pcds.colors)
-
-            # import matplotlib.pyplot as plt
-            # from mpl_toolkits.mplot3d import Axes3D
-            # fig = plt.figure()
-            # ax = fig.add_subplot(111, projection='3d')
-
-            # # Scatter plot
-            # ax.scatter(xyz[:, 0], xyz[:, 1], xyz[:, 2], c=color, s=20)
-
-            # # Labels
-            # ax.set_xlabel('X Label')
-            # ax.set_ylabel('Y Label')
-            # ax.set_zlabel('Z Label')
-
-            # # Save the plot
-            # plt.savefig('1.png')
-            # plt.close()
-
-            ret['point_cloud'] = np.concatenate([xyz, color], 1)
 
         if self._is_v1:
             for robot in self.env.robots:
@@ -419,6 +236,80 @@ class EnvRobosuite(EB.EnvBase):
             ret["eef_quat"] = np.array(di["eef_quat"])
             ret["gripper_qpos"] = np.array(di["gripper_qpos"])
         return ret
+
+    def get_real_depth_map(self, depth_map):
+        """
+        Reproduced from https://github.com/ARISE-Initiative/robosuite/blob/c57e282553a4f42378f2635b9a3cbc4afba270fd/robosuite/utils/camera_utils.py#L106
+        since older versions of robosuite do not have this conversion from normalized depth values returned by MuJoCo
+        to real depth values.
+        """
+        # Make sure that depth values are normalized
+        assert np.all(depth_map >= 0.0) and np.all(depth_map <= 1.0)
+        extent = self.env.sim.model.stat.extent
+        far = self.env.sim.model.vis.map.zfar * extent
+        near = self.env.sim.model.vis.map.znear * extent
+        return near / (1.0 - depth_map * (1.0 - near / far))
+
+    def get_camera_intrinsic_matrix(self, camera_name, camera_height, camera_width):
+        """
+        Obtains camera intrinsic matrix.
+        Args:
+            camera_name (str): name of camera
+            camera_height (int): height of camera images in pixels
+            camera_width (int): width of camera images in pixels
+        Return:
+            K (np.array): 3x3 camera matrix
+        """
+        cam_id = self.env.sim.model.camera_name2id(camera_name)
+        fovy = self.env.sim.model.cam_fovy[cam_id]
+        f = 0.5 * camera_height / np.tan(fovy * np.pi / 360)
+        K = np.array([[f, 0, camera_width / 2], [0, f, camera_height / 2], [0, 0, 1]])
+        return K
+
+    def get_camera_extrinsic_matrix(self, camera_name):
+        """
+        Returns a 4x4 homogenous matrix corresponding to the camera pose in the
+        world frame. MuJoCo has a weird convention for how it sets up the
+        camera body axis, so we also apply a correction so that the x and y
+        axis are along the camera view and the z axis points along the
+        viewpoint.
+        Normal camera convention: https://docs.opencv.org/2.4/modules/calib3d/doc/camera_calibration_and_3d_reconstruction.html
+        Args:
+            camera_name (str): name of camera
+        Return:
+            R (np.array): 4x4 camera extrinsic matrix
+        """
+        cam_id = self.env.sim.model.camera_name2id(camera_name)
+        camera_pos = self.env.sim.data.cam_xpos[cam_id]
+        camera_rot = self.env.sim.data.cam_xmat[cam_id].reshape(3, 3)
+        R = T.make_pose(camera_pos, camera_rot)
+
+        # IMPORTANT! This is a correction so that the camera axis is set up along the viewpoint correctly.
+        camera_axis_correction = np.array(
+            [[1.0, 0.0, 0.0, 0.0], [0.0, -1.0, 0.0, 0.0], [0.0, 0.0, -1.0, 0.0], [0.0, 0.0, 0.0, 1.0]]
+        )
+        R = R @ camera_axis_correction
+        return R
+
+    def get_camera_transform_matrix(self, camera_name, camera_height, camera_width):
+        """
+        Camera transform matrix to project from world coordinates to pixel coordinates.
+        Args:
+            camera_name (str): name of camera
+            camera_height (int): height of camera images in pixels
+            camera_width (int): width of camera images in pixels
+        Return:
+            K (np.array): 4x4 camera matrix to project from world coordinates to pixel coordinates
+        """
+        R = self.get_camera_extrinsic_matrix(camera_name=camera_name)
+        K = self.get_camera_intrinsic_matrix(
+            camera_name=camera_name, camera_height=camera_height, camera_width=camera_width
+        )
+        K_exp = np.eye(4)
+        K_exp[:3, :3] = K
+
+        # Takes a point in world, transforms to camera frame, and then projects onto image plane.
+        return K_exp @ T.pose_inv(R)
 
     def get_state(self):
         """
