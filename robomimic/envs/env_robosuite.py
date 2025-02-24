@@ -74,7 +74,7 @@ class EnvRobosuite(EB.EnvBase):
             ignore_done=True,
             use_object_obs=True,
             use_camera_obs=use_image_obs,
-            camera_depths=True,
+            camera_depths=False,
         )
         kwargs.update(update_kwargs)
 
@@ -206,6 +206,15 @@ class EnvRobosuite(EB.EnvBase):
                 ret[k] = di[k][::-1]
                 if self.postprocess_visual_obs:
                     ret[k] = ObsUtils.process_obs(obs=ret[k], obs_key=k)
+
+                # add camera parameter
+                camera_name = k.replace('_image', '')
+                height, width, _ = ret[k].shape
+                intrinsic = self.get_camera_intrinsic_matrix(camera_name, height, width)
+                extrinsic = self.get_camera_extrinsic_matrix(camera_name)
+                ret[k.replace('_image', '_intrinsic')] = intrinsic
+                ret[k.replace('_image', '_extrinsic')] = extrinsic
+
             elif (k in ObsUtils.OBS_KEYS_TO_MODALITIES) and ObsUtils.key_is_obs_modality(key=k, obs_modality="depth"):
                 ret[k] = di[k][::-1]
                 ret[k] = np.clip(ret[k], 0, 1)
@@ -235,6 +244,7 @@ class EnvRobosuite(EB.EnvBase):
             ret["eef_pos"] = np.array(di["eef_pos"])
             ret["eef_quat"] = np.array(di["eef_quat"])
             ret["gripper_qpos"] = np.array(di["gripper_qpos"])
+
         return ret
 
     def get_real_depth_map(self, depth_map):
@@ -447,6 +457,7 @@ class EnvRobosuite(EB.EnvBase):
         if is_v1:
             image_modalities = ["{}_image".format(cn) for cn in camera_names]
             depth_modalities = ["{}_depth".format(cn) for cn in camera_names]
+
         elif has_camera:
             # v0.3 only had support for one image, and it was named "rgb"
             assert len(image_modalities) == 1
