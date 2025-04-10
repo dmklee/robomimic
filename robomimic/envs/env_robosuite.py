@@ -204,15 +204,23 @@ class EnvRobosuite(EB.EnvBase):
         for k in di:
             if (k in ObsUtils.OBS_KEYS_TO_MODALITIES) and ObsUtils.key_is_obs_modality(key=k, obs_modality="rgb"):
                 ret[k] = di[k][::-1]
+
+                height, width, _ = ret[k].shape
                 if self.postprocess_visual_obs:
                     ret[k] = ObsUtils.process_obs(obs=ret[k], obs_key=k)
 
                 # add camera parameter
                 camera_name = k.replace('_image', '')
-                height, width, _ = ret[k].shape
+                # want intrinsic in normalized space, where pixels range from -1 to 1
                 intrinsic = self.get_camera_intrinsic_matrix(camera_name, height, width)
+                norm_intrinsic = np.array((
+                    (intrinsic[0, 0] / (width / 2), 0, (intrinsic[0, 2] - width/2) / (width/2), ),
+                    (0, intrinsic[1, 1] / (height / 2), (intrinsic[1, 2] - height/2) / (height/2)),
+                    (0, 0, 1),
+                ))
                 extrinsic = self.get_camera_extrinsic_matrix(camera_name)
-                ret[k.replace('_image', '_intrinsic')] = intrinsic
+
+                ret[k.replace('_image', '_intrinsic')] = norm_intrinsic
                 ret[k.replace('_image', '_extrinsic')] = extrinsic
 
             elif (k in ObsUtils.OBS_KEYS_TO_MODALITIES) and ObsUtils.key_is_obs_modality(key=k, obs_modality="depth"):
