@@ -37,6 +37,7 @@ class EnvRobosuite(EB.EnvBase):
             render=False,
             render_offscreen=False,
             use_image_obs=False,
+            use_depth_obs=False,
             postprocess_visual_obs=True,
             **kwargs,
     ):
@@ -74,7 +75,7 @@ class EnvRobosuite(EB.EnvBase):
             ignore_done=True,
             use_object_obs=True,
             use_camera_obs=use_image_obs,
-            camera_depths=False,
+            camera_depths=use_depth_obs,
         )
         kwargs.update(update_kwargs)
 
@@ -90,7 +91,7 @@ class EnvRobosuite(EB.EnvBase):
             # make sure gripper visualization is turned off (we almost always want this for learning)
             kwargs["gripper_visualization"] = False
             del kwargs["camera_depths"]
-            kwargs["camera_depth"] = False  # rename kwarg
+            kwargs["camera_depth"] = use_depth_obs  # rename kwarg
 
         self._env_name = env_name
         self._init_kwargs = deepcopy(kwargs)
@@ -186,7 +187,10 @@ class EnvRobosuite(EB.EnvBase):
             self.env.viewer.set_camera(cam_id)
             return self.env.render()
         elif mode == "rgb_array":
-            return self.env.sim.render(height=height, width=width, camera_name=camera_name)[::-1]
+            im = self.env.sim.render(height=height, width=width, camera_name=camera_name)
+            if self.use_depth_obs:
+                return im[0][::-1]
+            return im[::-1]
         else:
             raise NotImplementedError("mode={} is not implemented".format(mode))
 
@@ -462,6 +466,7 @@ class EnvRobosuite(EB.EnvBase):
 
         # also initialize obs utils so it knows which modalities are image modalities
         image_modalities = list(camera_names)
+        depth_modalities = list(camera_names)
         if is_v1:
             image_modalities = ["{}_image".format(cn) for cn in camera_names]
             depth_modalities = ["{}_depth".format(cn) for cn in camera_names]
@@ -474,10 +479,11 @@ class EnvRobosuite(EB.EnvBase):
             "obs": {
                 "low_dim": [],  # technically unused, so we don't have to specify all of them
                 "rgb": image_modalities,
-                "depth": depth_modalities,
             }
         }
-        ObsUtils.initialize_obs_utils_with_obs_specs(obs_modality_specs)
+        if use_depth_obs:
+            obs_modality_specs["obs"]["depth"] = depth_modalities
+        obsUtils.initialize_obs_utils_with_obs_specs(obs_modality_specs)
 
         # note that @postprocess_visual_obs is False since this env's images will be written to a dataset
         return cls(
