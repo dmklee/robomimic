@@ -215,17 +215,11 @@ class EnvRobosuite(EB.EnvBase):
 
                 # add camera parameter
                 camera_name = k.replace('_image', '')
-                # want intrinsic in normalized space, where pixels range from -1 to 1
                 intrinsic = self.get_camera_intrinsic_matrix(camera_name, height, width)
-                norm_intrinsic = np.array((
-                    (intrinsic[0, 0] / (width / 2), 0, (intrinsic[0, 2] - width/2) / (width/2), ),
-                    (0, intrinsic[1, 1] / (height / 2), (intrinsic[1, 2] - height/2) / (height/2)),
-                    (0, 0, 1),
-                ))
                 extrinsic = self.get_camera_extrinsic_matrix(camera_name)
 
-                ret[k.replace('_image', '_intrinsic')] = norm_intrinsic
-                ret[k.replace('_image', '_extrinsic')] = extrinsic
+                ret[k.replace('_image', '_K')] = intrinsic
+                ret[k.replace('_image', '_c2w')] = extrinsic
 
             elif (k in ObsUtils.OBS_KEYS_TO_MODALITIES) and ObsUtils.key_is_obs_modality(key=k, obs_modality="depth"):
                 ret[k] = di[k][::-1]
@@ -481,9 +475,9 @@ class EnvRobosuite(EB.EnvBase):
                 "rgb": image_modalities,
             }
         }
-        if use_depth_obs:
+        if kwargs.get("camera_depth", False):
             obs_modality_specs["obs"]["depth"] = depth_modalities
-        obsUtils.initialize_obs_utils_with_obs_specs(obs_modality_specs)
+        ObsUtils.initialize_obs_utils_with_obs_specs(obs_modality_specs)
 
         # note that @postprocess_visual_obs is False since this env's images will be written to a dataset
         return cls(
