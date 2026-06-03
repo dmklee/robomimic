@@ -473,6 +473,7 @@ class EnvRobosuite(EB.EnvBase):
             "obs": {
                 "low_dim": [],  # technically unused, so we don't have to specify all of them
                 "rgb": image_modalities,
+                "depth": depth_modalities,
             }
         }
         if kwargs.get("camera_depth", False):
